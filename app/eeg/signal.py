@@ -17,6 +17,10 @@ BANDS = {'delta': (1., 4.), 'theta': (4., 8.), 'alpha': (8., 13.),
 FEATURE_NAMES = tuple([f'{b}_relative_power' for b in BANDS] +
                       ['variance', 'hjorth_mobility', 'hjorth_complexity', 'spectral_entropy'])
 
+# Features that do not depend on amplitude units. Public microvolt datasets can only be
+# matched to ADC-count hardware through these (absolute variance is excluded).
+SCALE_FREE_FEATURES = tuple(n for n in FEATURE_NAMES if n != 'variance')
+
 # Explicit three-state quality taxonomy
 QUALITY_ACCEPTABLE = "Acceptable"
 QUALITY_NEEDS_REVIEW = "Needs review"
@@ -78,6 +82,72 @@ def segment(length, size, hop):
         yield start, start + size
 
 
+def _spectral_core(x, fs, config):
+    """Detrend, notch, bandpass, crop edge guards and extract spectral features.
+
+    Single implementation shared by live analysis (ADC counts) and offline public-data
+    training (any amplitude unit), so both compute identical features. Returns a dict
+    with an 'error' key (human reason, machine reason) when the window cannot be analysed.
+    """
+    # Preprocessing: detrend, notch, 4th-order Butterworth bandpass
+    y = detrend(x, type='linear')
+    if config.notch_hz:
+        if config.notch_hz >= fs / 2:
+            return {'error': ('Notch is invalid at measured rate', 'notch_exceeds_nyquist')}
+        b, a = iirnotch(config.notch_hz, 30, fs=fs)
+        y = sosfiltfilt(tf2sos(b, a), y)
+    if config.high_hz >= fs / 2:
+        return {'error': ('Bandpass is invalid at measured rate', 'bandpass_exceeds_nyquist')}
+    y = sosfiltfilt(butter(4, [config.low_hz, config.high_hz], btype='bandpass', fs=fs, output='sos'), y)
+
+    # Discard 1s edge guards to eliminate filter ringing transients
+    guard = round(config.guard_seconds * config.sample_rate)
+    filtered_active = y[guard:-guard]
+
+    # Spectral Estimation via Welch Periodogram
+    f, psd = welch(filtered_active, fs=fs, nperseg=min(len(filtered_active), round(2 * fs)),
+                   detrend='constant', scaling='density')
+    df = f[1] - f[0]
+    selection = (f >= config.low_hz) & (f <= config.high_hz)
+    total = float(np.sum(psd[selection]) * df)
+    if total <= np.finfo(float).eps:
+        return {'error': ('No measurable power in passband', 'no_passband_power')}
+
+    # Band power decomposition
+    bands = {}
+    for name, (lo, hi) in BANDS.items():
+        available = lo >= config.low_hz and hi <= config.high_hz
+        mask = (f >= lo) & (f < hi)
+        power = float(np.sum(psd[mask]) * df) if available else None
+        bands[name] = {
+            'range_hz': [lo, hi],
+            'absolute': power,
+            'relative': power / total if power is not None else None,
+            'available': available
+        }
+
+    # Core statistical and complexity metrics
+    variance = float(np.var(filtered_active))
+    mean_val = float(np.mean(filtered_active))
+    rms_val = float(np.sqrt(np.mean(filtered_active ** 2)))
+    d1 = np.diff(filtered_active) * fs
+    d2 = np.diff(filtered_active, n=2) * fs ** 2
+    mobility = float(np.sqrt(np.var(d1) / max(variance, 1e-15)))
+    complexity = float(np.sqrt(np.var(d2) / max(np.var(d1), 1e-15)) / max(mobility, 1e-15))
+    p = psd[selection] / np.sum(psd[selection])
+    entropy = float(-np.sum(p * np.log2(p + 1e-30)) / np.log2(len(p)))
+    peak_idx = int(np.argmax(psd[selection]))
+    peak_freq = float(f[selection][peak_idx])
+
+    # Preserved 9-element feature vector for backwards-compatible model inference
+    features = [bands[b]['relative'] for b in BANDS] + [variance, mobility, complexity, entropy]
+    return {'guard': guard, 'filtered_active': filtered_active, 'f': f, 'psd': psd,
+            'selection': selection, 'total': total, 'bands': bands, 'variance': variance,
+            'mean_val': mean_val, 'rms_val': rms_val, 'mobility': mobility,
+            'complexity': complexity, 'entropy': entropy, 'peak_freq': peak_freq,
+            'features': features}
+
+
 def analyze(timestamps, values, config):
     """Evaluate quality, filter window, and extract spectral features.
     
@@ -132,60 +202,15 @@ def analyze(timestamps, values, config):
     if raw_std > 350. or float(np.ptp(x)) > 950.:
         return invalid('Excessive raw biopotential amplitude', 'excessive_amplitude')
 
-    # Preprocessing: detrend, notch, 4th-order Butterworth bandpass
-    y = detrend(x, type='linear')
-    if config.notch_hz:
-        if config.notch_hz >= fs / 2:
-            return invalid('Notch is invalid at measured rate', 'notch_exceeds_nyquist')
-        b, a = iirnotch(config.notch_hz, 30, fs=fs)
-        y = sosfiltfilt(tf2sos(b, a), y)
-    if config.high_hz >= fs / 2:
-        return invalid('Bandpass is invalid at measured rate', 'bandpass_exceeds_nyquist')
-    y = sosfiltfilt(butter(4, [config.low_hz, config.high_hz], btype='bandpass', fs=fs, output='sos'), y)
-
-    # Discard 1s edge guards to eliminate filter ringing transients
-    guard = round(config.guard_seconds * config.sample_rate)
-    filtered_active = y[guard:-guard]
-    raw_active = x[guard:-guard]
-    active_t = t[guard:-guard]
-
-    # Spectral Estimation via Welch Periodogram
-    f, psd = welch(filtered_active, fs=fs, nperseg=min(len(filtered_active), round(2 * fs)),
-                   detrend='constant', scaling='density')
-    df = f[1] - f[0]
-    selection = (f >= config.low_hz) & (f <= config.high_hz)
-    total = float(np.sum(psd[selection]) * df)
-    if total <= np.finfo(float).eps:
-        return invalid('No measurable power in passband', 'no_passband_power')
-
-    # Band power decomposition
-    bands = {}
-    for name, (lo, hi) in BANDS.items():
-        available = lo >= config.low_hz and hi <= config.high_hz
-        mask = (f >= lo) & (f < hi)
-        power = float(np.sum(psd[mask]) * df) if available else None
-        bands[name] = {
-            'range_hz': [lo, hi],
-            'absolute': power,
-            'relative': power / total if power is not None else None,
-            'available': available
-        }
-
-    # Core statistical and complexity metrics
-    variance = float(np.var(filtered_active))
-    mean_val = float(np.mean(filtered_active))
-    rms_val = float(np.sqrt(np.mean(filtered_active ** 2)))
-    d1 = np.diff(filtered_active) * fs
-    d2 = np.diff(filtered_active, n=2) * fs ** 2
-    mobility = float(np.sqrt(np.var(d1) / max(variance, 1e-15)))
-    complexity = float(np.sqrt(np.var(d2) / max(np.var(d1), 1e-15)) / max(mobility, 1e-15))
-    p = psd[selection] / np.sum(psd[selection])
-    entropy = float(-np.sum(p * np.log2(p + 1e-30)) / np.log2(len(p)))
-    peak_idx = int(np.argmax(psd[selection]))
-    peak_freq = float(f[selection][peak_idx])
-
-    # Preserved 9-element feature vector for backwards-compatible model inference
-    features = [bands[b]['relative'] for b in BANDS] + [variance, mobility, complexity, entropy]
+    core = _spectral_core(x, fs, config)
+    if 'error' in core:
+        return invalid(*core['error'])
+    guard = core['guard']
+    raw_active, active_t = x[guard:-guard], t[guard:-guard]
+    filtered_active, f, psd, selection = core['filtered_active'], core['f'], core['psd'], core['selection']
+    total, bands, features = core['total'], core['bands'], core['features']
+    variance, mean_val, rms_val = core['variance'], core['mean_val'], core['rms_val']
+    mobility, complexity, entropy, peak_freq = core['mobility'], core['complexity'], core['entropy'], core['peak_freq']
 
     # Evaluated 3-state quality taxonomy and machine-readable reasons
     quality_state = QUALITY_ACCEPTABLE
@@ -260,3 +285,31 @@ def analyze(timestamps, values, config):
             '30–40 Hz is partial gamma and sensitive to muscle contamination.'
         ]
     }
+
+
+def window_features(values, config, max_robust_z=12.0):
+    """Features for one externally sourced single-channel window in any amplitude unit.
+
+    `values` must already be at `config.sample_rate` and have `config.input_samples` samples
+    (filter edge guards included). Returns `(features_by_name, None)` or `(None, reason)`.
+    Rejections use unit-free rules only; they are heuristics, not validated artifact removal.
+    """
+    x = np.asarray(values, dtype=float)
+    if x.ndim != 1 or len(x) != config.input_samples:
+        return None, 'wrong_length'
+    if not np.isfinite(x).all():
+        return None, 'non_finite_samples'
+    if float(np.mean(np.diff(x) == 0)) > .95:
+        return None, 'flatline'
+    centre = float(np.median(x))
+    mad = 1.4826 * float(np.median(np.abs(x - centre)))
+    if mad <= 0:
+        return None, 'flatline'
+    if float(np.max(np.abs(x - centre))) > max_robust_z * mad:
+        return None, 'amplitude_outlier'
+    core = _spectral_core(x, float(config.sample_rate), config)
+    if 'error' in core:
+        return None, core['error'][1]
+    if any(v is None for v in core['features']):
+        return None, 'unsupported_band'
+    return dict(zip(FEATURE_NAMES, core['features'])), None

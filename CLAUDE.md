@@ -39,3 +39,5 @@ Current work in progress: see `HANDOFF.md`.
 - Firmware: `firmware/maker_uno_eeg/maker_uno_eeg.ino`, Maker UNO A0, 115200 baud, nominal 250 Hz, raw 10-bit counts. Custom ASCII protocol, not Chords.
 - One amplifier is one channel. Simulation requires explicit selection and never produces classifier outputs.
 - Use one backend worker. See `docs/HARDWARE.md`, `docs/EEG_ML.md`, `docs/AUDIT.md`, `docs/VALIDATION.md`. Physical hardware/firmware upload validation remains pending.
+- Public-data path: `app/eeg/public_data.py` (EDF/manifest adapters, one channel, resampled to 250 Hz), `app/eeg/public_training.py` (subject-disjoint, scale-free features only), CLI `train_public_eeg.py`. Live and offline features share `signal._spectral_core`; keep them identical. Artifact schema 2 in `app/eeg/model.py`; `live_compatible: false` artifacts (depression baseline) never load live. Kit recordings: `prepare_eeg_recordings.py` then `train_eeg.py`. See `docs/EEG_PUBLIC_DATA.md`, `docs/EEG_PROTOCOL.md`.
+- EEG tests: `.venv/bin/python -m pytest tests/test_eeg_*.py`. Signals in `tests/test_eeg_public.py` are synthetic; never quote their scores as EEG performance.

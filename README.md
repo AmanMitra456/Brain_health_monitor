@@ -4,7 +4,7 @@ Local research workstation with **single-channel EEG acquisition/analysis** and 
 
 **Raspberry Pi is not used.** Hardware is Maker UNO + one BioAmp EXG Pill + electrodes/accessories + jumper wires + USB + laptop. MRI images come from files, never from this EEG hardware. Neither pipeline establishes clinical diagnosis, certification, disease absence, mental-health status or intelligence.
 
-Audit and priorities: [docs/AUDIT.md](docs/AUDIT.md). Hardware details: [docs/HARDWARE.md](docs/HARDWARE.md). EEG dataset/training contract: [docs/EEG_ML.md](docs/EEG_ML.md). Verification and change inventory: [docs/VALIDATION.md](docs/VALIDATION.md).
+Audit and priorities: [docs/AUDIT.md](docs/AUDIT.md). Hardware details: [docs/HARDWARE.md](docs/HARDWARE.md). EEG dataset/training contract: [docs/EEG_ML.md](docs/EEG_ML.md). Training on public datasets (stress/mental load, offline depression baseline): [docs/EEG_PUBLIC_DATA.md](docs/EEG_PUBLIC_DATA.md). Recording protocol for the kit: [docs/EEG_PROTOCOL.md](docs/EEG_PROTOCOL.md). Verification and change inventory: [docs/VALIDATION.md](docs/VALIDATION.md).
 
 ## Install and run
 

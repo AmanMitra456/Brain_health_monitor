@@ -1,0 +1,2 @@
+# Optional: only needed to read public EEG datasets (EDF files) with train_public_eeg.py
+mne>=1.6,<2

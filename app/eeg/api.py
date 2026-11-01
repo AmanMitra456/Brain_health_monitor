@@ -84,7 +84,7 @@ def model_info(s=Depends(service)):
     if s.model is None:
         return {'available': False, 'reason': 'No EEG model installed; labeled dataset required'}
     # No training subject identifiers or source-file paths in the public response.
-    return {k: v for k, v in s.model.info.items() if k in ('available', 'reason', 'name', 'version', 'task', 'labels', 'feature_names', 'preprocessing', 'units', 'limitation')}
+    return {k: v for k, v in s.model.info.items() if k in ('available', 'reason', 'name', 'version', 'task', 'labels', 'feature_names', 'preprocessing', 'units', 'limitation', 'module_id', 'training_domain')}
 
 
 @router.get('/api/eeg/models/registry')
@@ -96,10 +96,12 @@ def model_registry(s=Depends(service)):
             'name': s.model.info.get('name'),
             'version': s.model.info.get('version'),
             'task': s.model.info.get('task'),
-            'labels': s.model.info.get('labels')
+            'labels': s.model.info.get('labels'),
+            'module_id': s.model.info.get('module_id'),
+            'units': s.model.info.get('units')
         }
 
-    return {
+    registry = {
         'registry_version': '2.0',
         'active_model': active_model,
         'hardware_scope': 'Maker UNO + BioAmp EXG Pill (1 bipolar biopotential channel, uncalibrated 10-bit ADC counts)',
@@ -166,6 +168,13 @@ def model_registry(s=Depends(service)):
             }
         ]
     }
+    # A loaded artifact only enables the module it declares; its own limitation text stays visible.
+    if active_model and active_model.get('module_id'):
+        for module in registry['modules']:
+            if module['module_id'] == active_model['module_id']:
+                module.update(availability=True, version=active_model['version'], reason=None,
+                              limitations=s.model.info.get('limitation', module['limitations']))
+    return registry
 
 
 @router.post('/api/eeg/recordings', dependencies=[Depends(local_control)])
